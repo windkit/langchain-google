@@ -25,6 +25,7 @@ validators = ">=0.22.0,<1"
 bottleneck = "^1.4.2"
 numexpr = "^2.8.6"
 pyarrow = "^19.0.1"
+langchain-google-common = {path = "../common", develop = true}
 
 [tool.poetry.group.test]
 optional = true

@@ -245,7 +245,7 @@ search_exp = glm.FunctionDeclaration(
     parameters=glm.Schema(
         type=glm.Type.OBJECT,
         description="Search tool",
-        properties={"question": glm.Schema(type=glm.Type.STRING)},
+        properties={"question": glm.Schema(type=glm.Type.STRING, title="Question")},
         required=["question"],
         title="search",
     ),
@@ -290,7 +290,7 @@ search_model_exp = glm.FunctionDeclaration(
         type=glm.Type.OBJECT,
         description="Search model",
         properties={
-            "question": glm.Schema(type=glm.Type.STRING),
+            "question": glm.Schema(type=glm.Type.STRING, title="Question"),
         },
         required=["question"],
         title="SearchModel",
@@ -303,7 +303,7 @@ search_model_exp_pyd = glm.FunctionDeclaration(
     parameters=glm.Schema(
         type=glm.Type.OBJECT,
         properties={
-            "question": glm.Schema(type=glm.Type.STRING),
+            "question": glm.Schema(type=glm.Type.STRING, title="Question"),
         },
         required=["question"],
     ),
@@ -714,7 +714,7 @@ def test_tool_to_dict_pydantic_nested() -> None:
                                         "properties": {},
                                         "property_ordering": [],
                                         "required": [],
-                                        "title": "",
+                                        "title": "Age",
                                         "type_": 3,
                                     },
                                     "name": {
@@ -728,7 +728,7 @@ def test_tool_to_dict_pydantic_nested() -> None:
                                         "properties": {},
                                         "property_ordering": [],
                                         "required": [],
-                                        "title": "",
+                                        "title": "Name",
                                         "type_": 1,
                                     },
                                 },
@@ -743,7 +743,7 @@ def test_tool_to_dict_pydantic_nested() -> None:
                             "properties": {},
                             "property_ordering": [],
                             "required": [],
-                            "title": "",
+                            "title": "Models",
                             "type_": 5,
                         }
                     },

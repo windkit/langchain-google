@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import collections
 import importlib
-import json
 import logging
 from typing import (
     Any,
@@ -18,7 +17,6 @@ from typing import (
     cast,
 )
 
-import google.ai.generativelanguage as glm
 import google.ai.generativelanguage_v1beta.types as gapic
 import proto  # type: ignore[import]
 from langchain_core.tools import BaseTool
@@ -28,33 +26,17 @@ from langchain_core.utils.function_calling import (
     convert_to_openai_tool,
 )
 from langchain_core.utils.json_schema import dereference_refs
+from langchain_google_common.functions_utils import (
+    TYPE_ENUM,
+    _get_properties_from_schema_any,
+)
+from langchain_google_common.functions_utils import (
+    dict_to_gapic_json_schema 
+)
 from pydantic import BaseModel
 from pydantic.v1 import BaseModel as BaseModelV1
 
 logger = logging.getLogger(__name__)
-
-
-TYPE_ENUM = {
-    "string": glm.Type.STRING,
-    "number": glm.Type.NUMBER,
-    "integer": glm.Type.INTEGER,
-    "boolean": glm.Type.BOOLEAN,
-    "array": glm.Type.ARRAY,
-    "object": glm.Type.OBJECT,
-    "null": None,
-}
-
-_ALLOWED_SCHEMA_FIELDS = []
-_ALLOWED_SCHEMA_FIELDS.extend([f.name for f in gapic.Schema()._pb.DESCRIPTOR.fields])
-_ALLOWED_SCHEMA_FIELDS.extend(
-    [
-        f
-        for f in gapic.Schema.to_dict(
-            gapic.Schema(), preserving_proto_field_name=False
-        ).keys()
-    ]
-)
-_ALLOWED_SCHEMA_FIELDS_SET = set(_ALLOWED_SCHEMA_FIELDS)
 
 
 # Info: This is a FunctionDeclaration(=fc).
@@ -79,38 +61,10 @@ _ToolType = Union[gapic.Tool, _ToolDict, _FunctionDeclarationLike]
 _ToolsType = Sequence[_ToolType]
 
 
-def _format_json_schema_to_gapic(schema: Dict[str, Any]) -> Dict[str, Any]:
-    converted_schema: Dict[str, Any] = {}
-    for key, value in schema.items():
-        if key == "definitions":
-            continue
-        elif key == "items":
-            converted_schema["items"] = _format_json_schema_to_gapic(value)
-        elif key == "properties":
-            converted_schema["properties"] = _get_properties_from_schema(value)
-            continue
-        elif key == "allOf":
-            if len(value) > 1:
-                logger.warning(
-                    "Only first value for 'allOf' key is supported. "
-                    f"Got {len(value)}, ignoring other than first value!"
-                )
-            return _format_json_schema_to_gapic(value[0])
-        elif key in ["type", "_type"]:
-            converted_schema["type"] = str(value).upper()
-        elif key not in _ALLOWED_SCHEMA_FIELDS_SET:
-            logger.warning(f"Key '{key}' is not supported in schema, ignoring")
-        else:
-            converted_schema[key] = value
-    return converted_schema
-
-
 def _dict_to_gapic_schema(schema: Dict[str, Any]) -> Optional[gapic.Schema]:
     if schema:
-        dereferenced_schema = dereference_refs(schema)
-        formatted_schema = _format_json_schema_to_gapic(dereferenced_schema)
-        json_schema = json.dumps(formatted_schema)
-        return gapic.Schema.from_json(json_schema)
+        json_schema = dict_to_gapic_json_schema(schema, pydantic_version="v1")
+        return gapic.Schema.from_json(json_schema, ignore_unknown_fields=True)
     return None
 
 
@@ -125,6 +79,7 @@ def _format_dict_to_function_declaration(
 
 
 # Info: gapic.Tool means function_declarations and proto.Message.
+# common: _format_to_gapic_tool
 def convert_to_genai_function_declarations(
     tools: _ToolsType,
 ) -> gapic.Tool:
@@ -190,6 +145,7 @@ def convert_to_genai_function_declarations(
     return gapic_tool
 
 
+# common: keep
 def tool_to_dict(tool: gapic.Tool) -> _ToolDict:
     def _traverse_values(raw: Any) -> Any:
         if isinstance(raw, list):
@@ -302,149 +258,6 @@ def _convert_pydantic_to_genai_function(
     return function_declaration
 
 
-def _get_properties_from_schema_any(schema: Any) -> Dict[str, Any]:
-    if isinstance(schema, Dict):
-        return _get_properties_from_schema(schema)
-    return {}
-
-
-def _get_properties_from_schema(schema: Dict) -> Dict[str, Any]:
-    properties = {}
-    for k, v in schema.items():
-        if not isinstance(k, str):
-            logger.warning(f"Key '{k}' is not supported in schema, type={type(k)}")
-            continue
-        if not isinstance(v, Dict):
-            logger.warning(f"Value '{v}' is not supported in schema, ignoring v={v}")
-            continue
-        properties_item: Dict[str, Union[str, int, Dict, List]] = {}
-        if v.get("type") or v.get("anyOf") or v.get("type_"):
-            item_type_ = _get_type_from_schema(v)
-            properties_item["type_"] = item_type_
-            if _is_nullable_schema(v):
-                properties_item["nullable"] = True
-
-            # Replace `v` with chosen definition for array / object json types
-            any_of_types = v.get("anyOf")
-            if any_of_types and item_type_ in [glm.Type.ARRAY, glm.Type.OBJECT]:
-                json_type_ = "array" if item_type_ == glm.Type.ARRAY else "object"
-                # Use Index -1 for consistency with `_get_nullable_type_from_schema`
-                v = [val for val in any_of_types if val.get("type") == json_type_][-1]
-
-        if v.get("enum"):
-            properties_item["enum"] = v["enum"]
-
-        description = v.get("description")
-        if description and isinstance(description, str):
-            properties_item["description"] = description
-
-        if properties_item.get("type_") == glm.Type.ARRAY and v.get("items"):
-            properties_item["items"] = _get_items_from_schema_any(v.get("items"))
-
-        if properties_item.get("type_") == glm.Type.OBJECT:
-            if (
-                v.get("anyOf")
-                and isinstance(v["anyOf"], list)
-                and isinstance(v["anyOf"][0], dict)
-            ):
-                v = v["anyOf"][0]
-            v_properties = v.get("properties")
-            if v_properties:
-                properties_item["properties"] = _get_properties_from_schema_any(
-                    v_properties
-                )
-                if isinstance(v_properties, dict):
-                    properties_item["required"] = [
-                        k for k, v in v_properties.items() if "default" not in v
-                    ]
-            else:
-                # Providing dummy type for object without properties
-                properties_item["type_"] = glm.Type.STRING
-
-        if k == "title" and "description" not in properties_item:
-            properties_item["description"] = k + " is " + str(v)
-
-        properties[k] = properties_item
-
-    return properties
-
-
-def _get_items_from_schema_any(schema: Any) -> Dict[str, Any]:
-    if isinstance(schema, (dict, list, str)):
-        return _get_items_from_schema(schema)
-    return {}
-
-
-def _get_items_from_schema(schema: Union[Dict, List, str]) -> Dict[str, Any]:
-    items: Dict = {}
-    if isinstance(schema, List):
-        for i, v in enumerate(schema):
-            items[f"item{i}"] = _get_properties_from_schema_any(v)
-    elif isinstance(schema, Dict):
-        items["type_"] = _get_type_from_schema(schema)
-        if items["type_"] == glm.Type.OBJECT and "properties" in schema:
-            items["properties"] = _get_properties_from_schema_any(schema["properties"])
-        if items["type_"] == glm.Type.ARRAY and "items" in schema:
-            items["items"] = _format_json_schema_to_gapic(schema["items"])
-        if "title" in schema or "description" in schema:
-            items["description"] = (
-                schema.get("description") or schema.get("title") or ""
-            )
-        if _is_nullable_schema(schema):
-            items["nullable"] = True
-        if "required" in schema:
-            items["required"] = schema["required"]
-    else:
-        # str
-        items["type_"] = _get_type_from_schema({"type": schema})
-        if _is_nullable_schema({"type": schema}):
-            items["nullable"] = True
-
-    return items
-
-
-def _get_type_from_schema(schema: Dict[str, Any]) -> int:
-    return _get_nullable_type_from_schema(schema) or glm.Type.STRING
-
-
-def _get_nullable_type_from_schema(schema: Dict[str, Any]) -> Optional[int]:
-    if "anyOf" in schema:
-        types = [
-            _get_nullable_type_from_schema(sub_schema) for sub_schema in schema["anyOf"]
-        ]
-        types = [t for t in types if t is not None]  # Remove None values
-        if types:
-            return types[-1]  # TODO: update FunctionDeclaration and pass all types?
-        else:
-            pass
-    elif "type" in schema or "type_" in schema:
-        type_ = schema["type"] if "type" in schema else schema["type_"]
-        if isinstance(type_, int):
-            return type_
-        stype = str(schema["type"]) if "type" in schema else str(schema["type_"])
-        return TYPE_ENUM.get(stype, glm.Type.STRING)
-    else:
-        pass
-    return glm.Type.STRING  # Default to string if no valid types found
-
-
-def _is_nullable_schema(schema: Dict[str, Any]) -> bool:
-    if "anyOf" in schema:
-        types = [
-            _get_nullable_type_from_schema(sub_schema) for sub_schema in schema["anyOf"]
-        ]
-        return any(t is None for t in types)
-    elif "type" in schema or "type_" in schema:
-        type_ = schema["type"] if "type" in schema else schema["type_"]
-        if isinstance(type_, int):
-            return False
-        stype = str(schema["type"]) if "type" in schema else str(schema["type_"])
-        return TYPE_ENUM.get(stype, glm.Type.STRING) is None
-    else:
-        pass
-    return False
-
-
 _ToolChoiceType = Union[
     dict, List[str], str, Literal["auto", "none", "any"], Literal[True]
 ]
@@ -459,6 +272,7 @@ class _ToolConfigDict(TypedDict):
     function_calling_config: _FunctionCallingConfigDict
 
 
+# dedup with common: _tool_choice_to_tool_config
 def _tool_choice_to_tool_config(
     tool_choice: _ToolChoiceType,
     all_names: List[str],
@@ -501,6 +315,7 @@ def _tool_choice_to_tool_config(
     )
 
 
+# common: keep
 def is_basemodel_subclass_safe(tool: Type) -> bool:
     if safe_import("langchain_core.utils.pydantic", "is_basemodel_subclass"):
         from langchain_core.utils.pydantic import (
